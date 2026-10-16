@@ -5,17 +5,12 @@ const rateLimitCache = new Map();
 
 /**
  * 频率限制校验辅助函数
- * @param {string} key 统计键 (如 sender:xxx@yyy.com 或 recipient:i@baey.top)
- * @param {number} windowSec 滑动窗口时长(秒)
- * @param {number} maxLimit 最大允许邮件数
- * @returns {boolean} true: 超过频率限制; false: 正常未超限
  */
 function isRateLimited(key, windowSec, maxLimit) {
   const now = Date.now();
   const windowMs = windowSec * 1000;
   
   let timestamps = rateLimitCache.get(key) || [];
-  // 过滤掉窗口期之外的历史记录
   timestamps = timestamps.filter(t => now - t < windowMs);
   
   if (timestamps.length >= maxLimit) {
@@ -25,7 +20,6 @@ function isRateLimited(key, windowSec, maxLimit) {
   timestamps.push(now);
   rateLimitCache.set(key, timestamps);
 
-  // 定期轻量修剪缓存防膨胀
   if (rateLimitCache.size > 2000) {
     for (const [k, v] of rateLimitCache.entries()) {
       if (v.length === 0 || now - v[v.length - 1] > 300000) {
@@ -47,10 +41,64 @@ function parseEnvInt(val, defaultVal) {
 }
 
 /**
- * 邮件分级防御、智能分流与防轰炸核心模块
+ * 提取发件人邮箱中的域名部分
+ */
+function extractDomain(emailStr) {
+  const match = (emailStr || "").match(/@([a-zA-Z0-9.\-_]+)/);
+  return match ? match[1].toLowerCase() : "";
+}
+
+/**
+ * 异步发送安全告警 Webhook (支持飞书、Bark、Telegram 或通用 JSON 接收端)
+ */
+async function sendSecurityAlert(env, ctx, alertData) {
+  const webhookUrl = env.ALERT_WEBHOOK_URL;
+  if (!webhookUrl) return;
+
+  const title = `🛡️ [边缘网关安全警报] ${alertData.type}`;
+  const textContent = `时间: ${new Date().toISOString()}\n收件人: ${alertData.to}\n发件人: ${alertData.from}\n原因: ${alertData.reason}\n处理动作: ${alertData.action}`;
+
+  let payload;
+  if (webhookUrl.includes("feishu.cn") || webhookUrl.includes("larksuite.com")) {
+    payload = {
+      msg_type: "text",
+      content: { text: `${title}\n${textContent}` }
+    };
+  } else if (webhookUrl.includes("day.app") || webhookUrl.includes("bark")) {
+    payload = {
+      title: title,
+      body: textContent,
+      group: "Security",
+      level: "critical"
+    };
+  } else {
+    payload = {
+      event: "security_alert",
+      title: title,
+      ...alertData,
+      timestamp: Date.now()
+    };
+  }
+
+  const alertPromise = fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }).catch(err => {
+    console.error("[Security Webhook Error]:", err.message);
+  });
+
+  if (ctx && ctx.waitUntil) {
+    ctx.waitUntil(alertPromise);
+  }
+}
+
+/**
+ * 邮件分级防御、智能分流、防轰炸、防钓鱼与恶意附件防护核心模块
  */
 export async function handleEmail(message, env, ctx) {
-  const from = (message.from || "").toLowerCase();
+  const fromRaw = message.headers.get("from") || message.from || "";
+  const fromEmail = (message.from || "").toLowerCase();
   const to = (message.to || "").toLowerCase();
   const subject = (message.headers.get("subject") || "").toLowerCase();
   const authResults = (message.headers.get("authentication-results") || "").toLowerCase();
@@ -65,30 +113,53 @@ export async function handleEmail(message, env, ctx) {
   }
 
   // ==========================================
-  // 【L0 级别：防邮件轰炸 / 洪水攻击拦截 (支持用户自定义配置 + 默认兜底)】
+  // 【超大邮件体积防御 (Max Raw Size Guard)】
+  // ==========================================
+  const maxMb = parseEnvInt(env.MAX_EMAIL_SIZE_MB, 25);
+  const maxBytes = maxMb * 1024 * 1024;
+  if (message.rawSize && message.rawSize > maxBytes) {
+    console.warn(`[体积超限拦截] 邮件大小 ${(message.rawSize / 1024 / 1024).toFixed(2)}MB 超过限制 ${maxMb}MB`);
+    message.setReject(`552 5.3.4 Message size exceeds fixed maximum limit (${maxMb}MB).`);
+    return;
+  }
+
+  // ==========================================
+  // 【L0 级别：防邮件轰炸 / 洪水攻击拦截 (支持自定义频控)】
   // ==========================================
   const floodDefault = SpamRules.floodProtection || {};
   const defaultSender = floodDefault.senderRateLimit || { windowSeconds: 60, maxCount: 3 };
   const defaultRecipient = floodDefault.recipientRateLimit || { windowSeconds: 60, maxCount: 20 };
 
-  // 动态读取环境变量配置（如果用户设置了就按用户设置的，未设置则采用默认规则）
   const senderWindowSec = parseEnvInt(env.FLOOD_SENDER_WINDOW_SECONDS, defaultSender.windowSeconds);
   const senderMaxCount = parseEnvInt(env.FLOOD_SENDER_MAX_COUNT, defaultSender.maxCount);
-
   const recipientWindowSec = parseEnvInt(env.FLOOD_RECIPIENT_WINDOW_SECONDS, defaultRecipient.windowSeconds);
   const recipientMaxCount = parseEnvInt(env.FLOOD_RECIPIENT_MAX_COUNT, defaultRecipient.maxCount);
 
-  // 1. 单发件人突发频控：某时间段内同一个发件人重复发送超过阈值，直接 550 拒信阻断
-  if (isRateLimited(`from:${from}`, senderWindowSec, senderMaxCount)) {
-    console.warn(`[防轰炸拦截] 发件人 ${from} 在 ${senderWindowSec}s 内超过 ${senderMaxCount} 封限制，予以拒信拦截`);
+  // 1. 单发件人突发频控
+  if (isRateLimited(`from:${fromEmail}`, senderWindowSec, senderMaxCount)) {
+    console.warn(`[防轰炸拦截] 发件人 ${fromEmail} 在 ${senderWindowSec}s 内超过 ${senderMaxCount} 封限制`);
+    sendSecurityAlert(env, ctx, {
+      type: "发件人频控轰炸拦截",
+      from: fromEmail,
+      to: to,
+      reason: `${senderWindowSec}s 内发送超过 ${senderMaxCount} 封`,
+      action: "550 拒信阻断"
+    });
     message.setReject(`550 5.7.0 Rate limit exceeded: max ${senderMaxCount} emails per ${senderWindowSec}s.`);
     return;
   }
 
-  // 2. 单收件人洪峰频控：某时间段内该收件人瞬间涌入邮件超过阈值，自动降级分流至隔离箱
+  // 2. 单收件人洪峰频控
   if (isRateLimited(`to:${to}`, recipientWindowSec, recipientMaxCount)) {
-    console.warn(`[防轰炸分流] 收件人 ${to} 在 ${recipientWindowSec}s 内涌入超过 ${recipientMaxCount} 封，自动转入隔离箱`);
-    
+    console.warn(`[防轰炸分流] 收件人 ${to} 在 ${recipientWindowSec}s 内涌入超过 ${recipientMaxCount} 封`);
+    sendSecurityAlert(env, ctx, {
+      type: "收件人散列洪峰告警",
+      from: fromEmail,
+      to: to,
+      reason: `单收件人瞬时涌入超过 ${recipientMaxCount} 封`,
+      action: "降级隔离至垃圾箱"
+    });
+
     const floodHeaders = new Headers();
     floodHeaders.set("X-Spam-Status", "Yes");
     floodHeaders.set("X-Spam-Reason", `Flood-Protection-Triggered-${recipientMaxCount}-per-${recipientWindowSec}s`);
@@ -103,24 +174,73 @@ export async function handleEmail(message, env, ctx) {
   }
 
   // ==========================================
-  // 【L1 级别：高危恶意直接拒信】
+  // 【L1 级别：高危欺诈、钓鱼仿冒与恶意文件拦截】
   // ==========================================
 
   // 1. 发件人黑名单
-  if (SpamRules.blockedSenders.some(blocked => from.includes(blocked.toLowerCase()))) {
-    console.warn(`[L1 拒信] 命中黑名单发件人: ${from}`);
+  if (SpamRules.blockedSenders.some(blocked => fromEmail.includes(blocked.toLowerCase()))) {
+    console.warn(`[L1 拒信] 命中黑名单发件人: ${fromEmail}`);
     message.setReject("550 5.7.1 Sender is blocked by domain security policy.");
     return;
   }
 
   // 2. SPF / DKIM / DMARC 欺诈仿冒拦截
   if (authResults.includes("spf=fail") || authResults.includes("dmarc=fail")) {
-    console.warn(`[L1 拒信] 伪造发件人未通过 SPF/DMARC: ${from}`);
+    console.warn(`[L1 拒信] 伪造发件人未通过 SPF/DMARC: ${fromEmail}`);
+    sendSecurityAlert(env, ctx, {
+      type: "邮件伪造验证失败",
+      from: fromEmail,
+      to: to,
+      reason: "SPF/DMARC 签名验证失败 (spf=fail / dmarc=fail)",
+      action: "550 拒信阻断"
+    });
     message.setReject("550 5.7.2 Email authentication (SPF/DMARC) failed.");
     return;
   }
 
-  // 3. 极度危险诈骗词（违规发票、博彩、高利贷）
+  // 3. 防发件人显示名称仿冒钓鱼 (Display Name Spoofing)
+  const fromDisplayLower = fromRaw.toLowerCase();
+  const senderDomain = extractDomain(fromEmail);
+  for (const rule of (SpamRules.brandSpoofing || [])) {
+    const hitBrand = rule.keywords.some(kw => fromDisplayLower.includes(kw.toLowerCase()));
+    if (hitBrand) {
+      const isDomainValid = rule.validDomains.some(vd => senderDomain === vd || senderDomain.endsWith("." + vd));
+      if (!isDomainValid) {
+        console.warn(`[防钓鱼拦截] 显示名称仿冒: "${fromRaw}" 真实域名 "${senderDomain}" 不在官方授权白名单中`);
+        sendSecurityAlert(env, ctx, {
+          type: "知名品牌显示名称钓鱼仿冒",
+          from: fromRaw,
+          to: to,
+          reason: `发件人声称来自品牌机构，但实际发信域为 ${senderDomain}`,
+          action: "550 拒信阻断"
+        });
+        message.setReject("550 5.7.1 Phishing attempt detected: Display name brand mismatch.");
+        return;
+      }
+    }
+  }
+
+  // 4. 恶意可执行附件嗅探拦截 (Dangerous Attachments Guard)
+  const mimeHeadersStr = (message.headers.get("content-disposition") || "") + " " +
+                         (message.headers.get("content-type") || "");
+  const hitDangerousExt = (SpamRules.dangerousExtensions || []).find(ext => {
+    const re = new RegExp(`filename=[^;]*\\${ext}["']?`, "i");
+    return re.test(mimeHeadersStr) || mimeHeadersStr.toLowerCase().includes(ext);
+  });
+  if (hitDangerousExt) {
+    console.warn(`[恶意附件拦截] 检测到高危可执行文件载荷: ${hitDangerousExt}`);
+    sendSecurityAlert(env, ctx, {
+      type: "恶意可执行文件附件拦截",
+      from: fromEmail,
+      to: to,
+      reason: `邮件携带高危后缀附件: ${hitDangerousExt}`,
+      action: "550 拒信阻断"
+    });
+    message.setReject(`550 5.7.0 Dangerous attachment detected (${hitDangerousExt}).`);
+    return;
+  }
+
+  // 5. 极度危险诈骗词（违规发票、博彩、高利贷）
   const hitHighRisk = SpamRules.highRiskKeywords.find(kw => subject.includes(kw.toLowerCase()));
   if (hitHighRisk) {
     console.warn(`[L1 拒信] 命中高危恶意关键词 [${hitHighRisk}]: ${subject}`);
@@ -159,7 +279,7 @@ export async function handleEmail(message, env, ctx) {
 
   try {
     await message.forward(primaryEmail, safeHeaders);
-    console.log(`[L3 正常放行] 安全送达: ${from} -> ${primaryEmail}`);
+    console.log(`[L3 正常放行] 安全送达: ${fromEmail} -> ${primaryEmail}`);
   } catch (err) {
     console.error(`[L3 转发异常]: ${err.message}`);
   }
