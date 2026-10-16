@@ -53,8 +53,19 @@
 #### ① 必填密钥 (Secrets)
 | 变量名 | 说明 |
 | :--- | :--- |
-| `CLOUDFLARE_API_TOKEN` | 具备 Edit Cloudflare Workers 权限的 API Token |
-| `CLOUDFLARE_ACCOUNT_ID` | 你的 Cloudflare Account ID |
+| `CLOUDFLARE_API_TOKEN` | 具备 Workers 部署权限的 API Token（创建步骤见下方说明） |
+| `CLOUDFLARE_ACCOUNT_ID` | 你的 Cloudflare Account ID（在 Cloudflare 仪表盘右侧即可复制） |
+
+> **💡 如何创建 `CLOUDFLARE_API_TOKEN` 并配置所需权限？**
+> 1. 登录 Cloudflare 控制台 -> 点击右上角头像 -> **My Profile（我的个人资料）** -> **API Tokens** -> 点击 **Create Token**。
+> 2. **推荐方式（直接使用官方模板）**：找到 **Edit Cloudflare Workers** 模板，点击 **Use template**，选择你的账号后创建即可。
+> 3. **自定义权限清单（Custom Token）**：若手动勾选权限，需赋予以下权限：
+>    * **Account（账户级别）**：
+>      * `Workers Scripts`: **Edit**（必须，用于创建和上传 Worker 脚本）
+>      * `Account Settings`: **Read**（推荐，读取账户基础信息）
+>    * **Zone（区域级别，可选）**：
+>      * `Workers Routes`: **Edit**（若绑定自定义域名路由时需要，默认 workers.dev 路由不需要）
+> 4. 生成 Token 后复制并填入 GitHub 仓库 Secrets 的 `CLOUDFLARE_API_TOKEN` 中。
 
 #### ② 转发与分流邮箱 (Variables 变量 或 Secrets 密钥)
 | 变量名 | 示例值 | 说明 |
