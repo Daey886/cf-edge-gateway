@@ -23,4 +23,20 @@ export const SpamRules = {
     "双十一", "双11", "双12", "免费领取", "抽奖赢", "推荐您购买",
     "营销推广", "产品宣讲", "最新促销", "折扣码", "特价狂欢",
   ],
+
+  // 防邮件轰炸配置 (Email Bombing / Flood Protection)
+  floodProtection: {
+    // 单发件人滑动窗口频率限制（例如：单个发件人 60 秒内最多 3 封，超过直接静默丢弃/拒信）
+    senderRateLimit: {
+      windowSeconds: 60,
+      maxCount: 3,
+    },
+    // 全局/单收件人突发洪峰限制（例如：单收件人 60 秒内最多 20 封，超过转入隔离箱或丢弃）
+    recipientRateLimit: {
+      windowSeconds: 60,
+      maxCount: 20,
+    },
+    // 内存滑动窗口淘汰时间（秒）
+    cleanupIntervalSeconds: 300,
+  },
 };

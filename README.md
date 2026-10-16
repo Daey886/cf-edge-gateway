@@ -1,6 +1,7 @@
 # Cloudflare Edge Gateway (cf-edge-gateway)
 
 一款轻量、高性能且易于扩展的 Cloudflare Workers 边缘网关：
+- **邮件防轰炸 (Anti-Bombing / Flood Protection)**：滑动窗口频控，防单发件人高频狂刷、防全网注册接口瞬时散列邮件洪水攻击。
 - **邮件安全防御 (Email Shield)**：发件人黑名单、SPF/DMARC 伪造验证、垃圾关键词精准拦截、邮件 550 拒信。
 - **三级智能分流 (3-Tier Triage)**：正常邮件安全直达收件箱，营销广告邮件注入标头并自动分流至隔离邮箱（如 Gmail `+spam` 别名或指定分类邮箱）。
 - **代理过滤与转发 (HTTP Proxy)**：边缘请求过滤、反向代理、自定义请求头修改。
@@ -15,13 +16,24 @@
 │   └── deploy.yml          # GitHub Actions 自动构建与发布流水线
 ├── src/
 │   ├── rules/
-│   │   └── spam.js         # 独立抽离的垃圾关键词与黑名单规则库
-│   ├── email.js            # 邮件路由与安全防御逻辑 (L1拒信/L2分流/L3直达)
+│   │   └── spam.js         # 独立抽离的防轰炸阈值、垃圾关键词与黑名单规则库
+│   ├── email.js            # 邮件路由与安全防御逻辑 (L0防轰炸/L1拒信/L2分流/L3直达)
 │   ├── http.js             # HTTP 边缘反代与请求过滤器
 │   └── index.js            # Workers 主调度入口
 ├── wrangler.toml           # Cloudflare 配置文件
 └── package.json
 ```
+
+---
+
+## 防护机制 (Defense Pipeline)
+
+1. **L0 级防轰炸 (Flood Protection)**：
+   * **发件人频控**：同发件人在 60 秒内超过 3 封，判定为脚本刷屏，直接 550 拒信。
+   * **收件人瞬时洪峰**：单收件人在 60 秒内瞬间涌入超过 20 封（常见于全网注册验证码恶意轰炸），自动触发降级隔离，全部导入分流箱，不打爆主收件箱。
+2. **L1 级硬拦截 (Hard Block)**：SPF/DMARC 仿冒伪造失败、黑名单发件人、违法欺诈高危词直接拒信。
+3. **L2 级软分流 (Soft Triage)**：推广促销词汇打上 `X-Spam-Status: Yes` 标头，分流至隔离邮箱。
+4. **L3 级安全放行 (Safe Inbox)**：验真完全合格直达主收件箱。
 
 ---
 

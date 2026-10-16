@@ -1,12 +1,44 @@
 import { SpamRules } from "./rules/spam.js";
 
+// 边缘内存级滑动窗口频率计数器 (Worker 隔离区常驻内存)
+const rateLimitCache = new Map();
+
 /**
- * 邮件分级防御与智能分流核心模块 (开源规范版)
- * 
- * 分级策略：
- * - L1 高危恶意 (Hard Block)：黑名单、SPF/DMARC伪造、诈骗博彩词 -> 550 拒信
- * - L2 疑似营销/垃圾 (Soft Triage)：推广营销词 -> 注入 X-Spam-Status 标头并支持分流到隔离邮箱
- * - L3 安全邮件 (Safe Inbox)：正常放行 -> 注入安全审计标头后直达主收件箱
+ * 频率限制校验辅助函数
+ * @param {string} key 统计键 (如 sender:xxx@yyy.com 或 recipient:i@baey.top)
+ * @param {number} windowSec 滑动窗口时长(秒)
+ * @param {number} maxLimit 最大允许邮件数
+ * @returns {boolean} true: 超过频率限制; false: 正常未超限
+ */
+function isRateLimited(key, windowSec, maxLimit) {
+  const now = Date.now();
+  const windowMs = windowSec * 1000;
+  
+  let timestamps = rateLimitCache.get(key) || [];
+  // 过滤掉窗口期之外的历史记录
+  timestamps = timestamps.filter(t => now - t < windowMs);
+  
+  if (timestamps.length >= maxLimit) {
+    return true;
+  }
+  
+  timestamps.push(now);
+  rateLimitCache.set(key, timestamps);
+
+  // 定期轻量修剪缓存防膨胀
+  if (rateLimitCache.size > 2000) {
+    for (const [k, v] of rateLimitCache.entries()) {
+      if (v.length === 0 || now - v[v.length - 1] > 300000) {
+        rateLimitCache.delete(k);
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * 邮件分级防御、智能分流与防轰炸核心模块
  */
 export async function handleEmail(message, env, ctx) {
   const from = (message.from || "").toLowerCase();
@@ -20,6 +52,38 @@ export async function handleEmail(message, env, ctx) {
   if (!primaryEmail) {
     console.error("[Config Error] 未配置 FORWARD_DEFAULT_EMAIL 目标邮箱，拒绝转发");
     message.setReject("550 5.7.1 Destination forwarding address is not configured.");
+    return;
+  }
+
+  // ==========================================
+  // 【L0 级别：防邮件轰炸 / 洪水攻击拦截 (Flood Protection)】
+  // ==========================================
+  const floodConfig = SpamRules.floodProtection || {};
+  const senderLimit = floodConfig.senderRateLimit || { windowSeconds: 60, maxCount: 3 };
+  const recipientLimit = floodConfig.recipientRateLimit || { windowSeconds: 60, maxCount: 20 };
+
+  // 1. 单发件人突发频控：防脚本狂刷同发件人轰炸
+  if (isRateLimited(`from:${from}`, senderLimit.windowSeconds, senderLimit.maxCount)) {
+    console.warn(`[防轰炸拦截] 发件人 ${from} 在 ${senderLimit.windowSeconds}s 内超过 ${senderLimit.maxCount} 封限制，予以拒信拦截`);
+    message.setReject("550 5.7.0 Rate limit exceeded. Too many emails sent in a short period.");
+    return;
+  }
+
+  // 2. 单收件人洪峰频控：防全网短信/注册接口散列轰炸 (如数千个不同网站同时发验证码)
+  if (isRateLimited(`to:${to}`, recipientLimit.windowSeconds, recipientLimit.maxCount)) {
+    console.warn(`[防轰炸分流] 收件人 ${to} 瞬间收到大量邮件 (超过 ${recipientLimit.maxCount} 封/分)，自动降级拦截/分流隔离`);
+    
+    // 洪峰期自动分流到垃圾隔离箱，并加上轰炸警报头，不打爆主收件箱
+    const floodHeaders = new Headers();
+    floodHeaders.set("X-Spam-Status", "Yes");
+    floodHeaders.set("X-Spam-Reason", "Flood-Protection-Triggered");
+    floodHeaders.set("X-Processed-By", "cf-edge-gateway-anti-flood");
+
+    try {
+      await message.forward(spamDestEmail, floodHeaders);
+    } catch (e) {
+      console.error(`[防轰炸隔离异常]: ${e.message}`);
+    }
     return;
   }
 
