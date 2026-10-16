@@ -34,11 +34,11 @@ jobs:
             MAX_EMAIL_SIZE_MB
             ALERT_WEBHOOK_URL
         env:
-          FORWARD_DEFAULT_EMAIL: ${{ vars.FORWARD_DEFAULT_EMAIL || secrets.FORWARD_DEFAULT_EMAIL || '' }}
-          FORWARD_SPAM_EMAIL: ${{ vars.FORWARD_SPAM_EMAIL || secrets.FORWARD_SPAM_EMAIL || '' }}
+          FORWARD_DEFAULT_EMAIL: ${{ vars.FORWARD_DEFAULT_EMAIL || secrets.FORWARD_DEFAULT_EMAIL || 'not-configured@domain.com' }}
+          FORWARD_SPAM_EMAIL: ${{ vars.FORWARD_SPAM_EMAIL || secrets.FORWARD_SPAM_EMAIL || 'not-configured@domain.com' }}
           FLOOD_SENDER_WINDOW_SECONDS: ${{ vars.FLOOD_SENDER_WINDOW_SECONDS || secrets.FLOOD_SENDER_WINDOW_SECONDS || '60' }}
           FLOOD_SENDER_MAX_COUNT: ${{ vars.FLOOD_SENDER_MAX_COUNT || secrets.FLOOD_SENDER_MAX_COUNT || '3' }}
           FLOOD_RECIPIENT_WINDOW_SECONDS: ${{ vars.FLOOD_RECIPIENT_WINDOW_SECONDS || secrets.FLOOD_RECIPIENT_WINDOW_SECONDS || '60' }}
           FLOOD_RECIPIENT_MAX_COUNT: ${{ vars.FLOOD_RECIPIENT_MAX_COUNT || secrets.FLOOD_RECIPIENT_MAX_COUNT || '20' }}
           MAX_EMAIL_SIZE_MB: ${{ vars.MAX_EMAIL_SIZE_MB || secrets.MAX_EMAIL_SIZE_MB || '25' }}
-          ALERT_WEBHOOK_URL: ${{ vars.ALERT_WEBHOOK_URL || secrets.ALERT_WEBHOOK_URL || '' }}
+          ALERT_WEBHOOK_URL: ${{ vars.ALERT_WEBHOOK_URL || secrets.ALERT_WEBHOOK_URL || 'disabled' }}
