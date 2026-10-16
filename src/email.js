@@ -38,6 +38,15 @@ function isRateLimited(key, windowSec, maxLimit) {
 }
 
 /**
+ * 安全解析正整数环境变量
+ */
+function parseEnvInt(val, defaultVal) {
+  if (!val) return defaultVal;
+  const n = parseInt(val, 10);
+  return (!isNaN(n) && n > 0) ? n : defaultVal;
+}
+
+/**
  * 邮件分级防御、智能分流与防轰炸核心模块
  */
 export async function handleEmail(message, env, ctx) {
@@ -56,27 +65,33 @@ export async function handleEmail(message, env, ctx) {
   }
 
   // ==========================================
-  // 【L0 级别：防邮件轰炸 / 洪水攻击拦截 (Flood Protection)】
+  // 【L0 级别：防邮件轰炸 / 洪水攻击拦截 (支持用户自定义配置 + 默认兜底)】
   // ==========================================
-  const floodConfig = SpamRules.floodProtection || {};
-  const senderLimit = floodConfig.senderRateLimit || { windowSeconds: 60, maxCount: 3 };
-  const recipientLimit = floodConfig.recipientRateLimit || { windowSeconds: 60, maxCount: 20 };
+  const floodDefault = SpamRules.floodProtection || {};
+  const defaultSender = floodDefault.senderRateLimit || { windowSeconds: 60, maxCount: 3 };
+  const defaultRecipient = floodDefault.recipientRateLimit || { windowSeconds: 60, maxCount: 20 };
 
-  // 1. 单发件人突发频控：防脚本狂刷同发件人轰炸
-  if (isRateLimited(`from:${from}`, senderLimit.windowSeconds, senderLimit.maxCount)) {
-    console.warn(`[防轰炸拦截] 发件人 ${from} 在 ${senderLimit.windowSeconds}s 内超过 ${senderLimit.maxCount} 封限制，予以拒信拦截`);
-    message.setReject("550 5.7.0 Rate limit exceeded. Too many emails sent in a short period.");
+  // 动态读取环境变量配置（如果用户设置了就按用户设置的，未设置则采用默认规则）
+  const senderWindowSec = parseEnvInt(env.FLOOD_SENDER_WINDOW_SECONDS, defaultSender.windowSeconds);
+  const senderMaxCount = parseEnvInt(env.FLOOD_SENDER_MAX_COUNT, defaultSender.maxCount);
+
+  const recipientWindowSec = parseEnvInt(env.FLOOD_RECIPIENT_WINDOW_SECONDS, defaultRecipient.windowSeconds);
+  const recipientMaxCount = parseEnvInt(env.FLOOD_RECIPIENT_MAX_COUNT, defaultRecipient.maxCount);
+
+  // 1. 单发件人突发频控：某时间段内同一个发件人重复发送超过阈值，直接 550 拒信阻断
+  if (isRateLimited(`from:${from}`, senderWindowSec, senderMaxCount)) {
+    console.warn(`[防轰炸拦截] 发件人 ${from} 在 ${senderWindowSec}s 内超过 ${senderMaxCount} 封限制，予以拒信拦截`);
+    message.setReject(`550 5.7.0 Rate limit exceeded: max ${senderMaxCount} emails per ${senderWindowSec}s.`);
     return;
   }
 
-  // 2. 单收件人洪峰频控：防全网短信/注册接口散列轰炸 (如数千个不同网站同时发验证码)
-  if (isRateLimited(`to:${to}`, recipientLimit.windowSeconds, recipientLimit.maxCount)) {
-    console.warn(`[防轰炸分流] 收件人 ${to} 瞬间收到大量邮件 (超过 ${recipientLimit.maxCount} 封/分)，自动降级拦截/分流隔离`);
+  // 2. 单收件人洪峰频控：某时间段内该收件人瞬间涌入邮件超过阈值，自动降级分流至隔离箱
+  if (isRateLimited(`to:${to}`, recipientWindowSec, recipientMaxCount)) {
+    console.warn(`[防轰炸分流] 收件人 ${to} 在 ${recipientWindowSec}s 内涌入超过 ${recipientMaxCount} 封，自动转入隔离箱`);
     
-    // 洪峰期自动分流到垃圾隔离箱，并加上轰炸警报头，不打爆主收件箱
     const floodHeaders = new Headers();
     floodHeaders.set("X-Spam-Status", "Yes");
-    floodHeaders.set("X-Spam-Reason", "Flood-Protection-Triggered");
+    floodHeaders.set("X-Spam-Reason", `Flood-Protection-Triggered-${recipientMaxCount}-per-${recipientWindowSec}s`);
     floodHeaders.set("X-Processed-By", "cf-edge-gateway-anti-flood");
 
     try {
