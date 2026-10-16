@@ -23,3 +23,9 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          vars: |
+            FORWARD_DEFAULT_EMAIL
+            FORWARD_SPAM_EMAIL
+        env:
+          FORWARD_DEFAULT_EMAIL: ${{ vars.FORWARD_DEFAULT_EMAIL || secrets.FORWARD_DEFAULT_EMAIL }}
+          FORWARD_SPAM_EMAIL: ${{ vars.FORWARD_SPAM_EMAIL || secrets.FORWARD_SPAM_EMAIL }}
