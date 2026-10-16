@@ -1,0 +1,14 @@
+{
+  "name": "cf-edge-gateway",
+  "version": "1.0.0",
+  "description": "Multi-purpose Cloudflare Edge Gateway: Email Security, Proxy Forwarding, Spam Filtering & Webhook Dispatcher",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^3.109.0"
+  }
+}

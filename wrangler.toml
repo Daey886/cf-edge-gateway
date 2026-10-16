@@ -1,0 +1,8 @@
+name = "cf-edge-gateway"
+main = "src/index.js"
+compatibility_date = "2026-10-15"
+
+[vars]
+FORWARD_DEFAULT_EMAIL = "your-verified-email@gmail.com"
+ENABLE_EMAIL_SHIELD = true
+ENABLE_HTTP_PROXY = true
